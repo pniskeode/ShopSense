@@ -1,0 +1,26 @@
+# The Colab reference uses 1.93.0. Its source distribution requires a Rust
+# build on Windows/Python 3.12, so use the compatible prebuilt wheel there.
+litellm==1.93.0; python_version < "3.12"
+litellm==1.102.1; python_version >= "3.12"
+pydantic==2.13.4
+python-dotenv==1.2.2
+langchain-core>=1.6,<2
+langchain-litellm>=0.9,<1
+supermemory==3.55.0
+tiktoken==0.13.0
+pytest>=8,<9
+qdrant-client==1.18.0
+langchain-google-genai==4.0.0
+langchain-community>=0.3,<1
+langchain-text-splitters>=0.3,<2
+langgraph>=1,<2
+langgraph-checkpoint-sqlite>=3,<4
+pypdf>=5,<7
+rank-bm25>=0.2,<1
+sentence-transformers>=5,<6
+fastmcp>=3.4,<4
+mcp>=1.28,<2
+langchain-mcp-adapters>=0.3,<0.4
+langfuse>=4,<5
+fastapi>=0.115,<1
+uvicorn>=0.30,<1

@@ -1,0 +1,114 @@
+[
+  {
+    "slug": "returns-policy",
+    "title": "Kartway Returns and Refunds Policy",
+    "section": "policy",
+    "markdown": "corpus/markdown/returns-policy.md",
+    "pdf": "corpus/pdf/returns-policy.pdf",
+    "chars": 2443
+  },
+  {
+    "slug": "refund-authority",
+    "title": "Refund Authorisation and Escalation Matrix",
+    "section": "policy",
+    "markdown": "corpus/markdown/refund-authority.md",
+    "pdf": "corpus/pdf/refund-authority.pdf",
+    "chars": 1691
+  },
+  {
+    "slug": "shipping-policy",
+    "title": "Shipping, Delivery and Lost-Parcel Policy",
+    "section": "policy",
+    "markdown": "corpus/markdown/shipping-policy.md",
+    "pdf": "corpus/pdf/shipping-policy.pdf",
+    "chars": 2256
+  },
+  {
+    "slug": "warranty-policy",
+    "title": "Warranty and Replacement Policy",
+    "section": "policy",
+    "markdown": "corpus/markdown/warranty-policy.md",
+    "pdf": "corpus/pdf/warranty-policy.pdf",
+    "chars": 2895
+  },
+  {
+    "slug": "escalation-tone",
+    "title": "Escalation Triggers and Customer Communication Standard",
+    "section": "operations",
+    "markdown": "corpus/markdown/escalation-tone.md",
+    "pdf": "corpus/pdf/escalation-tone.pdf",
+    "chars": 2523
+  },
+  {
+    "slug": "fraud-abuse",
+    "title": "Return Fraud and Abuse Prevention Standard",
+    "section": "compliance",
+    "markdown": "corpus/markdown/fraud-abuse.md",
+    "pdf": "corpus/pdf/fraud-abuse.pdf",
+    "chars": 2735
+  },
+  {
+    "slug": "category-electronics",
+    "title": "Category Policy Addendum: Electronics",
+    "section": "category_policy",
+    "markdown": "corpus/markdown/category-electronics.md",
+    "pdf": "corpus/pdf/category-electronics.pdf",
+    "chars": 2736
+  },
+  {
+    "slug": "category-home-kitchen",
+    "title": "Category Policy Addendum: Home & Kitchen",
+    "section": "category_policy",
+    "markdown": "corpus/markdown/category-home-kitchen.md",
+    "pdf": "corpus/pdf/category-home-kitchen.pdf",
+    "chars": 2070
+  },
+  {
+    "slug": "category-apparel",
+    "title": "Category Policy Addendum: Apparel",
+    "section": "category_policy",
+    "markdown": "corpus/markdown/category-apparel.md",
+    "pdf": "corpus/pdf/category-apparel.pdf",
+    "chars": 2178
+  },
+  {
+    "slug": "category-beauty",
+    "title": "Category Policy Addendum: Beauty",
+    "section": "category_policy",
+    "markdown": "corpus/markdown/category-beauty.md",
+    "pdf": "corpus/pdf/category-beauty.pdf",
+    "chars": 1952
+  },
+  {
+    "slug": "category-sports-outdoors",
+    "title": "Category Policy Addendum: Sports & Outdoors",
+    "section": "category_policy",
+    "markdown": "corpus/markdown/category-sports-outdoors.md",
+    "pdf": "corpus/pdf/category-sports-outdoors.pdf",
+    "chars": 2522
+  },
+  {
+    "slug": "category-toys",
+    "title": "Category Policy Addendum: Toys",
+    "section": "category_policy",
+    "markdown": "corpus/markdown/category-toys.md",
+    "pdf": "corpus/pdf/category-toys.pdf",
+    "chars": 2566
+  },
+  {
+    "slug": "category-groceries",
+    "title": "Category Policy Addendum: Groceries",
+    "section": "category_policy",
+    "markdown": "corpus/markdown/category-groceries.md",
+    "pdf": "corpus/pdf/category-groceries.pdf",
+    "chars": 2609
+  },
+  {
+    "slug": "category-furniture",
+    "title": "Category Policy Addendum: Furniture",
+    "section": "category_policy",
+    "markdown": "corpus/markdown/category-furniture.md",
+    "pdf": "corpus/pdf/category-furniture.pdf",
+    "chars": 2439
+  }
+]

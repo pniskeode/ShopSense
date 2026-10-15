@@ -1,0 +1,27 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Generated test runs and one-off debugging artifacts.
+/.test-tmp*/
+/.full-milestone-audit-test-tmp-*/
+/.m8-regression-*/
+/tmp/
+
+# Technical M3 bootstrap bookkeeping; customer memory lives in Supermemory.
+data/shopsense/memory/bootstrap_state.json
+
+# Local Gemini embedding cache for the M3 policy index.
+data/shopsense/policy_embedding_cache/
+
+# Local, reproducible M4 evaluation reports (the golden set itself is committed).
+data/shopsense/evaluation/reports/
+
+# Durable M5 LangGraph checkpoints. M1/M2 source data remains read-only.
+runtime/
+build/
+dist/
+*.egg-info/
+/.presentation-build/
