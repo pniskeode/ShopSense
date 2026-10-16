@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field, replace
@@ -13,7 +14,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ValidationError
 
 from shopsense.llm import LiteLLMClient, configured_model
-from shopsense.memory import create_m8_summary_model, create_supermemory_service
+from shopsense.memory import MemoryHit, PreferenceSaveResult, create_m8_summary_model, create_supermemory_service
 from shopsense.policy import PolicyHit, create_m8_policy_service
 from shopsense.policy.grounding import is_safe_policy_abstention
 from shopsense.reliability import CircuitBreaker, HumanQueue, NoopTracer, ResilientMCPToolClient, TraceRecorder, create_m7_tracer
@@ -28,6 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 M8_RUNTIME_PATH = PROJECT_ROOT / "runtime" / "shopsense_m8.sqlite"
 ESCALATION_POLICY_SLUG = "escalation-tone"
 PRIVACY_POLICY_SLUG = "fraud-abuse"
+ORDER_REFERENCE_PATTERN = re.compile(r"\bKW-O-\d+\b", re.IGNORECASE)
 
 
 class M8RuntimeError(RuntimeError):
@@ -127,6 +129,33 @@ class GuardrailCheckpoint:
     def save_or_load(
         self, *, case_id: str, customer_ref: str | None, body: str, channel: str, result: M8ChatResult
     ) -> M8ChatResult:
+        existing = self.load_or_raise(
+            case_id=case_id,
+            customer_ref=customer_ref,
+            body=body,
+            channel=channel,
+        )
+        if existing is not None:
+            return existing
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fingerprint = _fingerprint(customer_ref=customer_ref, body=body, channel=channel)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS m8_guardrail_checkpoints (
+                case_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response_json TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                "INSERT INTO m8_guardrail_checkpoints(case_id, fingerprint, response_json) VALUES (?, ?, ?)",
+                (case_id, fingerprint, json.dumps(result.as_dict(), ensure_ascii=False, sort_keys=True)),
+            )
+        return result
+
+    def load_or_raise(
+        self, *, case_id: str, customer_ref: str | None, body: str, channel: str
+    ) -> M8ChatResult | None:
+        """Return a prior short-circuit response without repeating side effects."""
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fingerprint = _fingerprint(customer_ref=customer_ref, body=body, channel=channel)
         with sqlite3.connect(self.path) as connection:
@@ -138,12 +167,8 @@ class GuardrailCheckpoint:
             row = connection.execute(
                 "SELECT fingerprint, response_json FROM m8_guardrail_checkpoints WHERE case_id = ?", (case_id,)
             ).fetchone()
-            if row is None:
-                connection.execute(
-                    "INSERT INTO m8_guardrail_checkpoints(case_id, fingerprint, response_json) VALUES (?, ?, ?)",
-                    (case_id, fingerprint, json.dumps(result.as_dict(), ensure_ascii=False, sort_keys=True)),
-                )
-                return result
+        if row is None:
+            return None
         saved_fingerprint, saved_response = str(row[0]), str(row[1])
         if saved_fingerprint != fingerprint:
             raise M8IdempotencyError("M8 message ID is already bound to a different customer message. Use a new message ID.")
@@ -210,6 +235,13 @@ class M8Runtime:
             )
 
         scope = self._classify_scope(body)
+        if scope is not None and scope.scope == "customer_memory":
+            return self._handle_customer_memory(
+                case_id=case_id,
+                message_id=normalized_message_id,
+                customer_ref=normalized_customer,
+                body=body,
+            )
         if scope is not None and scope.scope == "unsupported":
             refused = M8ChatResult(
                 case_id=case_id,
@@ -238,11 +270,19 @@ class M8Runtime:
 
         incoming = IncomingMessage.chat(normalized_customer, body, normalized_message_id)
         result = self.workflow.run_message(incoming)
-        post_check = self.guardrails.validate_policy_response(
-            question=incoming.body,
-            workflow_status=result.workflow_status,
-            message=result.message,
-            policy_citations=result.policy_citations,
+        # The policy grounding check applies only to policy-generated claims.
+        # An MCP-backed order, shipment, or refund response is authoritative
+        # operational data even when the customer's wording contains terms
+        # such as "refund amount" that also appear in policy questions.
+        post_check = (
+            GuardrailAssessment("allow")
+            if _m6_result_used_order_actions(result)
+            else self.guardrails.validate_policy_response(
+                question=incoming.body,
+                workflow_status=result.workflow_status,
+                message=result.message,
+                policy_citations=result.policy_citations,
+            )
         )
         if post_check.outcome == "policy_abstained":
             return M8ChatResult(
@@ -266,6 +306,94 @@ class M8Runtime:
             )
         return _from_m6(result, incoming.message_id)
 
+    def _handle_customer_memory(
+        self,
+        *,
+        case_id: str,
+        message_id: str,
+        customer_ref: str | None,
+        body: str,
+    ) -> M8ChatResult:
+        """Serve M3 memory directly instead of sending it through M6's operational routes."""
+
+        if self.guardrail_checkpoint is not None:
+            cached = self.guardrail_checkpoint.load_or_raise(
+                case_id=case_id,
+                customer_ref=customer_ref,
+                body=body,
+                channel="chat",
+            )
+            if cached is not None:
+                return cached
+
+        if customer_ref is None:
+            result = M8ChatResult(
+                case_id=case_id,
+                message_id=message_id,
+                workflow_status="needs_clarification",
+                message="Please provide your customer reference so I can access your saved tickets and preferences.",
+                policy_citations=(),
+                guardrail_outcome="allow",
+                audit={"m8_scope": "customer_memory", "m6_called": False, "memory_status": "customer_ref_required"},
+            )
+            return self._checkpoint_memory_result(result, customer_ref=customer_ref, body=body)
+
+        memory_service = getattr(self.workflow, "memory_service", None)
+        if memory_service is None:
+            result = M8ChatResult(
+                case_id=case_id,
+                message_id=message_id,
+                workflow_status="human_support_escalation",
+                message="I can’t access saved customer memory right now, so I’m routing this to customer support.",
+                policy_citations=(),
+                guardrail_outcome="allow",
+                audit={"m8_scope": "customer_memory", "m6_called": False, "memory_status": "unavailable"},
+            )
+            return self._checkpoint_memory_result(result, customer_ref=customer_ref, body=body)
+
+        try:
+            with self.tracer.run(case_id=case_id, channel="chat", customer_ref=customer_ref):
+                with self.tracer.span("shopsense.m8.customer_memory", {"customer_ref": customer_ref}):
+                    preference_save = memory_service.remember_explicit_preferences(customer_ref, body)
+                    hits = memory_service.recall_customer_memory(customer_ref, body)
+                    message = _format_customer_memory_answer(customer_ref, hits, preference_save)
+                    memory_service.record_interaction(customer_ref, body, message)
+        except Exception:
+            result = M8ChatResult(
+                case_id=case_id,
+                message_id=message_id,
+                workflow_status="human_support_escalation",
+                message="I can’t access saved customer memory right now, so I’m routing this to customer support.",
+                policy_citations=(),
+                guardrail_outcome="allow",
+                audit={"m8_scope": "customer_memory", "m6_called": False, "memory_status": "unavailable"},
+            )
+            return self._checkpoint_memory_result(result, customer_ref=customer_ref, body=body)
+
+        result = M8ChatResult(
+            case_id=case_id,
+            message_id=message_id,
+            workflow_status="auto_resolved",
+            message=message,
+            policy_citations=(),
+            guardrail_outcome="allow",
+            audit={"m8_scope": "customer_memory", "m6_called": False, "memory_status": "retrieved", "memory_hit_count": len(hits)},
+        )
+        return self._checkpoint_memory_result(result, customer_ref=customer_ref, body=body)
+
+    def _checkpoint_memory_result(
+        self, result: M8ChatResult, *, customer_ref: str | None, body: str
+    ) -> M8ChatResult:
+        if self.guardrail_checkpoint is None:
+            return result
+        return self.guardrail_checkpoint.save_or_load(
+            case_id=result.case_id,
+            customer_ref=customer_ref,
+            body=body,
+            channel="chat",
+            result=result,
+        )
+
     def _classify_scope(self, question: str) -> ScopeDecision | None:
         """Return a valid scope decision, or preserve the established route on failure."""
 
@@ -275,6 +403,16 @@ class M8Runtime:
             decision = self.scope_classifier.classify(question)
         except Exception:
             return None
+        if decision.scope == "unsupported" and _contains_order_reference(question):
+            # A syntactically valid order reference identifies an existing
+            # ShopSense operational capability.  Do not let a pre-routing
+            # model classification reject it before M6 can safely determine
+            # whether it is an order, shipment, refund, or policy request.
+            # This uses no source-data values: M6/MCP remains authoritative.
+            decision = ScopeDecision(
+                scope="operational",
+                reason="Explicit ShopSense order reference requires M6 operational triage.",
+            )
         with self.tracer.span("shopsense.m8.scope", {"scope": decision.scope}):
             pass
         return decision
@@ -387,6 +525,18 @@ def create_m8_evaluation_runtime(runtime_path: Path) -> M8Runtime:
     )
 
 
+def _contains_order_reference(question: str) -> bool:
+    """Return whether the user supplied a syntactically valid order reference."""
+
+    return bool(ORDER_REFERENCE_PATTERN.search(question))
+
+
+def _m6_result_used_order_actions(result: M6CaseResult) -> bool:
+    """Identify a result whose customer-facing facts came from the MCP boundary."""
+
+    return any(isinstance(entry, str) and entry.startswith("order-actions:") for entry in result.log)
+
+
 def _from_m6(result: M6CaseResult, message_id: str) -> M8ChatResult:
     return M8ChatResult(
         case_id=result.case_id,
@@ -407,6 +557,33 @@ def _m6_audit(result: M6CaseResult) -> dict[str, Any]:
         "m6_log": list(result.log),
         "m7_reliability": dict(result.reliability),
     }
+
+
+def _format_customer_memory_answer(
+    customer_ref: str,
+    hits: list[MemoryHit],
+    preference_save: PreferenceSaveResult,
+) -> str:
+    """Render customer memory without sending untrusted history to another model."""
+
+    preferences = [
+        hit for hit in hits
+        if hit.kind == "semantic" and hit.metadata.get("source") == "explicit_preference"
+    ]
+    history = [hit for hit in hits if hit not in preferences]
+    lines: list[str] = []
+    if preference_save.stored:
+        lines.append("I saved your updated preference.")
+    if preferences:
+        lines.append("Saved preferences:")
+        lines.extend(f"- {hit.text}" for hit in preferences)
+    if history:
+        lines.append("Relevant saved support history:")
+        lines.extend(f"- {hit.text}" for hit in history)
+    if not preferences and not history:
+        lines.append(f"I don’t have saved tickets or preferences for customer reference {customer_ref} yet.")
+    lines.extend(f"Note: {warning}" for warning in preference_save.warnings)
+    return "\n".join(lines)
 
 
 def _fingerprint(*, customer_ref: str | None, body: str, channel: str) -> str:

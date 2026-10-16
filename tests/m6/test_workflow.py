@@ -243,6 +243,26 @@ def test_explicit_refund_status_overrides_a_mistaken_policy_model_route(tmp_path
     assert "Refund details for order KW-O-TEST" in result.message
 
 
+def test_refund_amount_query_overrides_a_mistaken_policy_model_route(tmp_path: Path) -> None:
+    class MistakenPolicyModel(FakeModel):
+        def triage(self, message: IncomingMessage, memory_context: str) -> TriageDecision:
+            return TriageDecision(intent="policy", request_kind="policy", needs_policy=True)
+
+    mcp = FakeMCP(approved_amount=2_001)
+    workflow = M6Workflow(
+        policy_service=FakePolicyService(),  # type: ignore[arg-type]
+        tool_client=mcp, model=MistakenPolicyModel(), checkpoint_path=tmp_path / "m6.sqlite",
+    )
+    result = workflow.run_message(
+        IncomingMessage.chat(None, "What is the approved refund amount for order KW-O-000001?", "CHAT-REFUND-AMOUNT-OVERRIDE")
+    )
+
+    assert result.workflow_status == "auto_resolved"
+    assert result.policy_citations == ()
+    assert "Approved (awaiting payout): ₹2,001" in result.message
+    assert [call["order_ref"] for call in mcp.arguments] == ["KW-O-000001", "KW-O-000001", "KW-O-000001"]
+
+
 def test_refund_status_summary_is_short_only_when_explicitly_requested(tmp_path: Path) -> None:
     result = _workflow(tmp_path, FakeMCP()).run_message(
         IncomingMessage.chat(None, "Briefly summarize refund status of order KW-O-TEST.", "CHAT-REFUND-STATUS-SUMMARY")

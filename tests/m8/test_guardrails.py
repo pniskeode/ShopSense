@@ -8,6 +8,7 @@ import pytest
 
 from shopsense.m8 import GuardrailCheckpoint, M8Guardrails, M8IdempotencyError, M8Runtime
 from shopsense.m8.runtime import ScopeDecision
+from shopsense.memory import MemoryHit, PreferenceSaveResult
 from shopsense.policy import PolicyHit
 from shopsense.workflow import IncomingMessage, M6CaseResult
 from shopsense.workflow.m5 import RefundPolicyDecision
@@ -38,6 +39,25 @@ class FakeWorkflow:
     def run_message(self, message: IncomingMessage) -> M6CaseResult:
         self.calls += 1
         return self.result
+
+
+class RecordingMemoryService:
+    def __init__(self, hits: list[MemoryHit]) -> None:
+        self.hits = hits
+        self.preference_writes: list[tuple[str, str]] = []
+        self.interactions: list[tuple[str, str, str]] = []
+
+    def remember_explicit_preferences(self, customer_ref: str, text: str) -> PreferenceSaveResult:
+        self.preference_writes.append((customer_ref, text))
+        return PreferenceSaveResult(stored=0)
+
+    def recall_customer_memory(self, customer_ref: str, query: str) -> list[MemoryHit]:
+        assert customer_ref == "KW-C-TEST"
+        assert query == "What are my contact preferences?"
+        return list(self.hits)
+
+    def record_interaction(self, customer_ref: str, question: str, answer: str) -> None:
+        self.interactions.append((customer_ref, question, answer))
 
 
 class RecordingTracer:
@@ -300,6 +320,86 @@ def test_order_only_question_reaches_the_m6_workflow_without_customer_context() 
 @pytest.mark.parametrize(
     "question",
     [
+        "give me complete details of this order KW-O-001497",
+        "Track the shipment for order KW-O-000004",
+        "Show the refund records and current refund status for order KW-O-000288",
+        "What is the refund amount for order KW-O-000288?",
+    ],
+)
+def test_final_demo_order_scoped_requests_override_an_incorrect_unsupported_scope(question: str) -> None:
+    """M8 must give M6 a chance to process any valid order-scoped request."""
+
+    tracer = RecordingTracer()
+    workflow = FakeWorkflow(
+        M6CaseResult(
+            case_id="m6:chat:M8-DEMO-OPERATIONAL", channel="chat", workflow_status="auto_resolved",
+            message="Verified operational details were returned from the order system.", route_reasons=(),
+            policy_citations=(), log=("order-actions: verified an order through MCP",), reliability={},
+        )
+    )
+    runtime = M8Runtime(
+        workflow,  # type: ignore[arg-type]
+        M8Guardrails(FakePolicyProvider()),
+        tracer=tracer,
+        scope_classifier=StaticScopeClassifier(ScopeDecision(scope="unsupported", reason="mistaken model route")),
+    )
+
+    result = runtime.handle_chat(customer_ref=None, message=question, message_id=f"M8-ORDER-SCOPE-{len(question)}")
+
+    assert result.workflow_status == "auto_resolved"
+    assert result.case_id == "m6:chat:M8-DEMO-OPERATIONAL"
+    assert workflow.calls == 1
+    assert ("shopsense.m8.scope", {"scope": "operational"}) in tracer.spans
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what are the refund rules related to amount? when human approval is needed?",
+        "I bought a blender 40 days ago and want to return it. Your site says 30 days but a friend said apparel gets 45, so surely kitchen does too?",
+    ],
+)
+def test_final_demo_policy_questions_continue_to_m6_policy_rag(question: str) -> None:
+    workflow = FakeWorkflow(
+        M6CaseResult(
+            case_id="m6:chat:M8-DEMO-POLICY", channel="chat", workflow_status="auto_resolved",
+            message="The policy answer is grounded. [SOURCE:refund-authority:test:0]", route_reasons=(),
+            policy_citations=("refund-authority:test:0",), log=(), reliability={},
+        )
+    )
+    runtime = M8Runtime(
+        workflow,  # type: ignore[arg-type]
+        M8Guardrails(FakePolicyProvider()),
+        scope_classifier=StaticScopeClassifier(ScopeDecision(scope="policy", reason="policy question")),
+    )
+
+    result = runtime.handle_chat(customer_ref=None, message=question, message_id=f"M8-POLICY-SCOPE-{len(question)}")
+
+    assert result.workflow_status == "auto_resolved"
+    assert result.policy_citations == ("refund-authority:test:0",)
+    assert workflow.calls == 1
+
+
+def test_final_demo_high_value_refund_is_blocked_before_m6() -> None:
+    runtime, workflow = _runtime()
+
+    result = runtime.handle_chat(
+        customer_ref=None,
+        message=(
+            "This is the third time I'm writing. My 34,000 rupee television arrived cracked. "
+            "Refund it NOW or I'm going to the consumer forum."
+        ),
+        message_id="M8-DEMO-HIGH-REFUND",
+    )
+
+    assert result.workflow_status == "human_support_escalation"
+    assert result.guardrail_outcome == "refund_cap_escalated"
+    assert workflow.calls == 0
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
         "Can you recommend a product for my specific needs?",
         "What is the company's stance on environmental sustainability?",
     ],
@@ -334,3 +434,73 @@ def test_scope_classifier_failure_preserves_the_existing_m6_route() -> None:
 
     assert result.workflow_status == "auto_resolved"
     assert workflow.calls == 1
+
+
+def test_customer_memory_scope_reads_verified_namespace_without_running_m6() -> None:
+    memory = RecordingMemoryService(
+        [
+            MemoryHit(
+                kind="semantic",
+                text="Customer explicitly prefers: email or message only, with no phone calls.",
+                score=1.0,
+                metadata={"source": "explicit_preference", "preference_key": "communication"},
+            )
+        ]
+    )
+    workflow = FakeWorkflow()
+    workflow.memory_service = memory  # type: ignore[attr-defined]
+    runtime = M8Runtime(
+        workflow,  # type: ignore[arg-type]
+        M8Guardrails(FakePolicyProvider()),
+        scope_classifier=StaticScopeClassifier(ScopeDecision(scope="customer_memory", reason="preferences")),
+    )
+
+    result = runtime.handle_chat(
+        customer_ref="KW-C-TEST",
+        message="What are my contact preferences?",
+        message_id="M8-MEMORY",
+    )
+
+    assert result.workflow_status == "auto_resolved"
+    assert "Saved preferences:" in result.message
+    assert "no phone calls" in result.message
+    assert result.policy_citations == ()
+    assert workflow.calls == 0
+    assert memory.preference_writes == [("KW-C-TEST", "What are my contact preferences?")]
+    assert len(memory.interactions) == 1
+
+
+def test_customer_memory_scope_requires_customer_reference() -> None:
+    runtime, workflow = _runtime()
+    runtime.scope_classifier = StaticScopeClassifier(ScopeDecision(scope="customer_memory", reason="preferences"))
+
+    result = runtime.handle_chat(
+        customer_ref=None,
+        message="What are my contact preferences?",
+        message_id="M8-MEMORY-MISSING-REF",
+    )
+
+    assert result.workflow_status == "needs_clarification"
+    assert "customer reference" in result.message.lower()
+    assert workflow.calls == 0
+
+
+def test_customer_memory_retry_does_not_repeat_memory_writes(tmp_path) -> None:
+    memory = RecordingMemoryService(
+        [MemoryHit(kind="semantic", text="Customer explicitly prefers: email only.", score=1.0, metadata={"source": "explicit_preference"})]
+    )
+    workflow = FakeWorkflow()
+    workflow.memory_service = memory  # type: ignore[attr-defined]
+    runtime = M8Runtime(
+        workflow,  # type: ignore[arg-type]
+        M8Guardrails(FakePolicyProvider()),
+        guardrail_checkpoint=GuardrailCheckpoint(tmp_path / "m8.sqlite"),
+        scope_classifier=StaticScopeClassifier(ScopeDecision(scope="customer_memory", reason="preferences")),
+    )
+
+    first = runtime.handle_chat(customer_ref="KW-C-TEST", message="What are my contact preferences?", message_id="M8-MEMORY-RETRY")
+    second = runtime.handle_chat(customer_ref="KW-C-TEST", message="What are my contact preferences?", message_id="M8-MEMORY-RETRY")
+
+    assert second == first
+    assert len(memory.preference_writes) == 1
+    assert len(memory.interactions) == 1
